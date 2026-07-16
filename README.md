@@ -1,4 +1,4 @@
-# html2apk BY Hekcer
+# html2apk BY Hecker
 
 > Convert any HTML/CSS/JS project or URL into a signed Android APK — no Android Studio, no Java, no setup.
 
