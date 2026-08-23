@@ -9,6 +9,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.webkit.DownloadListener;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -16,21 +17,6 @@ import android.widget.FrameLayout;
 import android.widget.ProgressBar;
 import android.window.OnBackInvokedDispatcher;
 
-/**
- * Static, precompiled WebView Activity reused by EVERY app html2apk
- * generates. It never changes between builds, so it's compiled exactly
- * once into tools/classes.dex (see BUILD_TEMPLATE instructions) — the
- * per-app build pipeline only ever compiles resources/manifest with
- * aapt2, never recompiles Java.
- *
- * Because the same compiled class is reused across many different
- * generated app packages, it never references a generated app's R class
- * directly (those numeric resource IDs differ from build to build).
- * Instead it looks resources up by NAME at runtime via
- * getResources().getIdentifier(...), which works correctly regardless
- * of which package or numeric IDs aapt2 assigned for that particular
- * build.
- */
 public class MainActivity extends Activity {
 
     private WebView webView;
@@ -45,10 +31,13 @@ public class MainActivity extends Activity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
         settings.setAllowFileAccessFromFileURLs(true);
+        settings.setAllowUniversalAccessFromFileURLs(true);
 
         // Performance
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
@@ -87,9 +76,6 @@ public class MainActivity extends Activity {
             root.addView(progressBar, pp);
         }
 
-        // targetSdk 35+ enforces edge-to-edge: content draws under the status/nav
-        // bars by default. Pad the root view to the system bar insets ourselves
-        // so the WebView isn't covered by them.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             root.setOnApplyWindowInsetsListener((v, insets) -> {
                 Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
@@ -106,11 +92,50 @@ public class MainActivity extends Activity {
             }
         });
 
+        // Blob download listener — converts blob: URLs to base64 data URIs
+        webView.setDownloadListener(new DownloadListener() {
+            @Override
+            public void onDownloadStart(String url, String userAgent,
+                    String contentDisposition, String mimeType, long contentLength) {
+                if (url.startsWith("blob:")) {
+                    String filename = "download";
+                    if (contentDisposition != null) {
+                        java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("filename=\"?([^\"\\s;]+)\"?")
+                            .matcher(contentDisposition);
+                        if (m.find()) filename = m.group(1);
+                    }
+                    final String fname = filename;
+                    String js = "javascript:(function(){" +
+                        "var x=new XMLHttpRequest();" +
+                        "x.open('GET','" + url + "',true);" +
+                        "x.responseType='blob';" +
+                        "x.onload=function(){" +
+                            "var r=new FileReader();" +
+                            "r.onloadend=function(){" +
+                                "var a=document.createElement('a');" +
+                                "a.href=r.result;" +
+                                "a.download='" + fname + "';" +
+                                "document.body.appendChild(a);" +
+                                "a.click();" +
+                                "document.body.removeChild(a);" +
+                            "};" +
+                            "r.readAsDataURL(x.response);" +
+                        "};" +
+                        "x.send();" +
+                    "})();";
+                    webView.loadUrl(js);
+                    return;
+                }
+                android.content.Intent intent = new android.content.Intent(
+                    android.content.Intent.ACTION_VIEW);
+                intent.setData(android.net.Uri.parse(url));
+                startActivity(intent);
+            }
+        });
+
         setContentView(root);
 
-        // Predictive back (API 33+): a registered OnBackInvokedCallback takes
-        // priority over onBackPressed(), which is deprecated as of API 33.
-        // onBackPressed() below remains the active path on API < 33.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT,
