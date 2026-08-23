@@ -10433,29 +10433,53 @@ def run_gui():
     ttk.Checkbutton(krow, text='Enable zoom',      variable=v_zoom,  style='TCheckbutton').pack(side='left', padx=(0,20))
     ttk.Checkbutton(krow, text='Show loading bar', variable=v_load,  style='TCheckbutton').pack(side='left')
     prow = ttk.Frame(c3, style='Card.TFrame'); prow.pack(fill='x', pady=(6,0))
-    ttk.Label(prow, text='Permissions', style='Dim.TLabel').pack(anchor='w', pady=(0,4))
-    pgrid = ttk.Frame(prow, style='Card.TFrame'); pgrid.pack(fill='x')
-    _perms = [
-        ('Internet',          v_perm_internet),
-        ('Camera',            v_perm_camera),
-        ('Read Media',        v_perm_media),
-        ('Microphone',        v_perm_microphone),
-        ('Read Storage',      v_perm_storage_read),
-        ('Write Storage',     v_perm_storage_write),
-        ('GPS Location',      v_perm_location_fine),
-        ('Network Location',  v_perm_location_coarse),
-        ('Read Contacts',     v_perm_contacts_read),
-        ('Write Contacts',    v_perm_contacts_write),
-        ('Notifications',     v_perm_notifications),
-        ('Vibrate',           v_perm_vibrate),
-        ('NFC',               v_perm_nfc),
-        ('Bluetooth',         v_perm_bluetooth),
-        ('Biometric',         v_perm_biometric),
+
+    # All permissions definition
+    _perms_basic = [
+        ('Internet',      v_perm_internet),
+        ('Camera',        v_perm_camera),
+        ('Read Storage',  v_perm_storage_read),
+        ('Notifications', v_perm_notifications),
     ]
-    for i, (label, var) in enumerate(_perms):
-        col = i % 3
-        row = i // 3
-        ttk.Checkbutton(pgrid, text=label, variable=var, style='TCheckbutton').grid(row=row, column=col, sticky='w', padx=(0,16), pady=2)
+    _perms_extra = [
+        ('Read Media',       v_perm_media),
+        ('Microphone',       v_perm_microphone),
+        ('Write Storage',    v_perm_storage_write),
+        ('GPS Location',     v_perm_location_fine),
+        ('Network Location', v_perm_location_coarse),
+        ('Read Contacts',    v_perm_contacts_read),
+        ('Write Contacts',   v_perm_contacts_write),
+        ('Vibrate',          v_perm_vibrate),
+        ('NFC',              v_perm_nfc),
+        ('Bluetooth',        v_perm_bluetooth),
+        ('Biometric',        v_perm_biometric),
+    ]
+    _perm_expanded = tk.BooleanVar(value=False)
+
+    def _render_perms():
+        for w in pgrid.winfo_children():
+            w.destroy()
+        items = _perms_basic + (_perms_extra if _perm_expanded.get() else [])
+        for i, (label, var) in enumerate(items):
+            col = i % 3
+            row = i // 3
+            ttk.Checkbutton(pgrid, text=label, variable=var, style='TCheckbutton').grid(
+                row=row, column=col, sticky='w', padx=(0,16), pady=2)
+
+    def _toggle_perms():
+        _perm_expanded.set(not _perm_expanded.get())
+        arrow_lbl.config(text='▲ Show less' if _perm_expanded.get() else '▼ Show more')
+        _render_perms()
+
+    # Header row with label + toggle arrow
+    phdr = ttk.Frame(prow, style='Card.TFrame'); phdr.pack(fill='x')
+    ttk.Label(phdr, text='Permissions', style='Dim.TLabel').pack(side='left')
+    arrow_lbl = ttk.Label(phdr, text='▼ Show more', style='Dim.TLabel', cursor='hand2')
+    arrow_lbl.pack(side='right')
+    arrow_lbl.bind('<Button-1>', lambda e: _toggle_perms())
+
+    pgrid = ttk.Frame(prow, style='Card.TFrame'); pgrid.pack(fill='x', pady=(4,0))
+    _render_perms()
 
     # Signing card
     c_sign = card(inner, 'Signing Keystore')
