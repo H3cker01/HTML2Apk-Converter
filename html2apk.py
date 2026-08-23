@@ -9428,14 +9428,40 @@ def _xml_escape(s: str) -> str:
 
 def _build_manifest_xml(cfg: 'AppConfig') -> str:
     """Render a plain-text AndroidManifest.xml for aapt2 to compile."""
-    perms = [
-        '<uses-permission android:name="android.permission.INTERNET" />',
-        '<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
-    ]
+    perms = []
+    if cfg.perm_internet:
+        perms.append('<uses-permission android:name="android.permission.INTERNET" />')
+        perms.append('<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />')
     if cfg.perm_camera:
         perms.append('<uses-permission android:name="android.permission.CAMERA" />')
+        perms.append('<uses-feature android:name="android.hardware.camera" android:required="false" />')
     if cfg.perm_media:
         perms.append('<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />')
+    if cfg.perm_microphone:
+        perms.append('<uses-permission android:name="android.permission.RECORD_AUDIO" />')
+    if cfg.perm_storage_read:
+        perms.append('<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />')
+    if cfg.perm_storage_write:
+        perms.append('<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />')
+    if cfg.perm_location_fine:
+        perms.append('<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />')
+    if cfg.perm_location_coarse:
+        perms.append('<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />')
+    if cfg.perm_contacts_read:
+        perms.append('<uses-permission android:name="android.permission.READ_CONTACTS" />')
+    if cfg.perm_contacts_write:
+        perms.append('<uses-permission android:name="android.permission.WRITE_CONTACTS" />')
+    if cfg.perm_notifications:
+        perms.append('<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />')
+    if cfg.perm_vibrate:
+        perms.append('<uses-permission android:name="android.permission.VIBRATE" />')
+    if cfg.perm_nfc:
+        perms.append('<uses-permission android:name="android.permission.NFC" />')
+    if cfg.perm_bluetooth:
+        perms.append('<uses-permission android:name="android.permission.BLUETOOTH" />')
+        perms.append('<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />')
+    if cfg.perm_biometric:
+        perms.append('<uses-permission android:name="android.permission.USE_BIOMETRIC" />')
     perms_xml = '\n    '.join(perms)
 
     orientation  = cfg.orientation if cfg.orientation in ('portrait', 'landscape') else 'unspecified'
@@ -9714,8 +9740,21 @@ class AppConfig:
         self.local_html          : Optional[str] = kw.get('local_html')
         self.theme_color         : str           = validate_color(kw.get('theme_color', '#2196F3'))
         self.extra_files : List[dict]    = kw.get('extra_files', [])
-        self.perm_camera : bool          = bool(kw.get('perm_camera', False))
-        self.perm_media  : bool          = bool(kw.get('perm_media', False))
+        self.perm_camera         : bool = bool(kw.get('perm_camera', False))
+        self.perm_media          : bool = bool(kw.get('perm_media', False))
+        self.perm_microphone     : bool = bool(kw.get('perm_microphone', False))
+        self.perm_storage_read   : bool = bool(kw.get('perm_storage_read', False))
+        self.perm_storage_write  : bool = bool(kw.get('perm_storage_write', False))
+        self.perm_location_fine  : bool = bool(kw.get('perm_location_fine', False))
+        self.perm_location_coarse: bool = bool(kw.get('perm_location_coarse', False))
+        self.perm_contacts_read  : bool = bool(kw.get('perm_contacts_read', False))
+        self.perm_contacts_write : bool = bool(kw.get('perm_contacts_write', False))
+        self.perm_notifications  : bool = bool(kw.get('perm_notifications', False))
+        self.perm_vibrate        : bool = bool(kw.get('perm_vibrate', False))
+        self.perm_nfc            : bool = bool(kw.get('perm_nfc', False))
+        self.perm_bluetooth      : bool = bool(kw.get('perm_bluetooth', False))
+        self.perm_biometric      : bool = bool(kw.get('perm_biometric', False))
+        self.perm_internet       : bool = bool(kw.get('perm_internet', True))
         _min = max(21, min(int(kw.get('min_sdk',    DEFAULT_MIN_SDK)),    35))
         _tgt = max(21, min(int(kw.get('target_sdk', DEFAULT_TARGET_SDK)), 36))
         self.min_sdk    : int  = _min
@@ -10363,8 +10402,21 @@ def run_gui():
     v_orient = tk.StringVar(value='unspecified')
     v_zoom   = tk.BooleanVar(value=True)
     v_load   = tk.BooleanVar(value=True)
-    v_perm_camera = tk.BooleanVar(value=False)
-    v_perm_media  = tk.BooleanVar(value=False)
+    v_perm_internet       = tk.BooleanVar(value=True)
+    v_perm_camera         = tk.BooleanVar(value=False)
+    v_perm_media          = tk.BooleanVar(value=False)
+    v_perm_microphone     = tk.BooleanVar(value=False)
+    v_perm_storage_read   = tk.BooleanVar(value=False)
+    v_perm_storage_write  = tk.BooleanVar(value=False)
+    v_perm_location_fine  = tk.BooleanVar(value=False)
+    v_perm_location_coarse= tk.BooleanVar(value=False)
+    v_perm_contacts_read  = tk.BooleanVar(value=False)
+    v_perm_contacts_write = tk.BooleanVar(value=False)
+    v_perm_notifications  = tk.BooleanVar(value=False)
+    v_perm_vibrate        = tk.BooleanVar(value=False)
+    v_perm_nfc            = tk.BooleanVar(value=False)
+    v_perm_bluetooth      = tk.BooleanVar(value=False)
+    v_perm_biometric      = tk.BooleanVar(value=False)
 
     def _browse_icon():
         p = filedialog.askopenfilename(title='Select icon PNG',
@@ -10381,9 +10433,29 @@ def run_gui():
     ttk.Checkbutton(krow, text='Enable zoom',      variable=v_zoom,  style='TCheckbutton').pack(side='left', padx=(0,20))
     ttk.Checkbutton(krow, text='Show loading bar', variable=v_load,  style='TCheckbutton').pack(side='left')
     prow = ttk.Frame(c3, style='Card.TFrame'); prow.pack(fill='x', pady=(6,0))
-    ttk.Label(prow, text='Permissions', style='Dim.TLabel').pack(side='left', padx=(0,10))
-    ttk.Checkbutton(prow, text='Camera',                 variable=v_perm_camera, style='TCheckbutton').pack(side='left', padx=(0,20))
-    ttk.Checkbutton(prow, text='Read Media Images (file uploads)', variable=v_perm_media,  style='TCheckbutton').pack(side='left')
+    ttk.Label(prow, text='Permissions', style='Dim.TLabel').pack(anchor='w', pady=(0,4))
+    pgrid = ttk.Frame(prow, style='Card.TFrame'); pgrid.pack(fill='x')
+    _perms = [
+        ('Internet',          v_perm_internet),
+        ('Camera',            v_perm_camera),
+        ('Read Media',        v_perm_media),
+        ('Microphone',        v_perm_microphone),
+        ('Read Storage',      v_perm_storage_read),
+        ('Write Storage',     v_perm_storage_write),
+        ('GPS Location',      v_perm_location_fine),
+        ('Network Location',  v_perm_location_coarse),
+        ('Read Contacts',     v_perm_contacts_read),
+        ('Write Contacts',    v_perm_contacts_write),
+        ('Notifications',     v_perm_notifications),
+        ('Vibrate',           v_perm_vibrate),
+        ('NFC',               v_perm_nfc),
+        ('Bluetooth',         v_perm_bluetooth),
+        ('Biometric',         v_perm_biometric),
+    ]
+    for i, (label, var) in enumerate(_perms):
+        col = i % 3
+        row = i // 3
+        ttk.Checkbutton(pgrid, text=label, variable=var, style='TCheckbutton').grid(row=row, column=col, sticky='w', padx=(0,16), pady=2)
 
     # Signing card
     c_sign = card(inner, 'Signing Keystore')
@@ -10667,8 +10739,21 @@ def run_gui():
             icon_path   = v_icon.get().strip() or None,
             enable_zoom = v_zoom.get(),
             show_loading= v_load.get(),
-            perm_camera = v_perm_camera.get(),
-            perm_media  = v_perm_media.get(),
+            perm_internet        = v_perm_internet.get(),
+            perm_camera          = v_perm_camera.get(),
+            perm_media           = v_perm_media.get(),
+            perm_microphone      = v_perm_microphone.get(),
+            perm_storage_read    = v_perm_storage_read.get(),
+            perm_storage_write   = v_perm_storage_write.get(),
+            perm_location_fine   = v_perm_location_fine.get(),
+            perm_location_coarse = v_perm_location_coarse.get(),
+            perm_contacts_read   = v_perm_contacts_read.get(),
+            perm_contacts_write  = v_perm_contacts_write.get(),
+            perm_notifications   = v_perm_notifications.get(),
+            perm_vibrate         = v_perm_vibrate.get(),
+            perm_nfc             = v_perm_nfc.get(),
+            perm_bluetooth       = v_perm_bluetooth.get(),
+            perm_biometric       = v_perm_biometric.get(),
             extra_files = _get_files(),
             min_sdk     = ANDROID_VERSIONS.get(v_min_sdk.get(),    DEFAULT_MIN_SDK),
             target_sdk  = ANDROID_VERSIONS.get(v_target_sdk.get(), DEFAULT_TARGET_SDK),
@@ -10737,3 +10822,4 @@ def run_gui():
 # ═════════════════════════════════════════════════════════════════════════════
 if __name__ == '__main__':
     run_gui()
+
