@@ -9336,24 +9336,33 @@ BASE_DIR   = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
 TOOLS_DIR  = BASE_DIR / "tools"
 # ── Allow custom output folder ────────────────────────────────────────────
 import os
+# The install folder can be read-only (e.g. MSIX / Program Files), so anything
+# the app writes lives in a per-user data folder instead:
+#   Windows : %LOCALAPPDATA%\html2apk
+#   others  : ~/.html2apk
+if sys.platform == 'win32':
+    APP_DATA_DIR = Path(os.environ.get('LOCALAPPDATA') or (Path.home() / 'AppData' / 'Local')) / 'html2apk'
+else:
+    APP_DATA_DIR = Path.home() / '.html2apk'
+
 _output_folder = os.environ.get('HTML2APK_OUTPUT', None)
 if _output_folder:
     BUILD_DIR = Path(_output_folder)
 else:
-    BUILD_DIR = BASE_DIR / "build"
+    BUILD_DIR = APP_DATA_DIR / "build"
 
 
-# OUTPUT_DIR must live next to the actual .exe on disk, not inside the
-# PyInstaller --onefile temp extraction dir (sys._MEIPASS), which is wiped
-# when the process exits.
-EXE_DIR    = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-OUTPUT_DIR = EXE_DIR / "output"
+# OUTPUT_DIR has no default — the user must choose it in the Output page
+# (or via the prompt shown when starting a build).
+OUTPUT_DIR = None
 
 AAPT2       = TOOLS_DIR / "aapt2.exe"
 ZIPALIGN    = TOOLS_DIR / "zipalign.exe"
 ANDROID_JAR = TOOLS_DIR / "android.jar"
 APKSIGNER   = TOOLS_DIR / "apksigner.jar"
-KEYSTORE    = TOOLS_DIR / "debug.keystore"
+KEYSTORE    = TOOLS_DIR / "debug.keystore"          # bundled (read-only)
+USER_KEYSTORE = APP_DATA_DIR / "debug.keystore"     # writable fallback
+ACTIVE_DEBUG_KS = KEYSTORE                          # set by _ensure_debug_keystore()
 WEBVIEW_DEX = TOOLS_DIR / "classes.dex"
 BUNDLETOOL  = TOOLS_DIR / "bundletool.jar"
 D8_JAR      = TOOLS_DIR / "d8.jar"
@@ -9379,6 +9388,16 @@ def _jre_exe(name: str) -> str:
 
 JAVA_EXE    = _jre_exe("java")
 KEYTOOL_EXE = _jre_exe("keytool")
+
+# ── Default debug-signing values ──────────────────────────────────────────────
+DEBUG_KS_ALIAS      = 'androiddebugkey'
+DEBUG_KS_STORE_PASS = 'android'
+DEBUG_KS_KEY_PASS   = 'android'
+
+def _max_validity_days() -> int:
+    """Longest validity keytool accepts (cert must end by year 9999)."""
+    from datetime import date
+    return max(1, (date(9999, 12, 31) - date.today()).days - 2)
 
 # Fully-qualified class name of the static, precompiled WebView Activity.
 # This is fixed regardless of the app's own package name (see
@@ -9471,6 +9490,9 @@ def _build_manifest_xml(cfg: 'AppConfig') -> str:
         perms.append('<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />')
     if cfg.perm_biometric:
         perms.append('<uses-permission android:name="android.permission.USE_BIOMETRIC" />')
+    # AdMob: Required for apps targeting Android 13+ to access Advertising ID
+    if cfg.admob_enabled:
+        perms.append('<uses-permission android:name="com.google.android.gms.permission.AD_ID" />')
     perms_xml = '\n    '.join(perms)
 
     orientation  = cfg.orientation if cfg.orientation in ('portrait', 'landscape') else 'unspecified'
@@ -9940,6 +9962,69 @@ def _zipalign(src: Path, dst: Path, log) -> bool:
     return _run_tool([str(ZIPALIGN), '-f', '4', str(src), str(dst)], log, 'zipalign')
 
 
+def _debug_ks_valid(ks: Path, log) -> Optional[bool]:
+    """True if ks holds a usable 'androiddebugkey' (password 'android');
+    False if not; None if keytool itself could not be run."""
+    try:
+        r = subprocess.run(
+            [KEYTOOL_EXE, '-list', '-keystore', str(ks),
+             '-storepass', DEBUG_KS_STORE_PASS, '-alias', DEBUG_KS_ALIAS],
+            capture_output=True, text=True)
+    except FileNotFoundError as e:
+        log(f'[-] keytool not found: {e}')
+        return None
+    return r.returncode == 0 and 'PrivateKeyEntry' in (r.stdout or '')
+
+
+def _ensure_debug_keystore(log) -> bool:
+    """Pick a usable debug keystore ('androiddebugkey' / 'android' / 'android').
+
+    1. the bundled tools/debug.keystore, if valid (only ever read);
+    2. otherwise a keystore in the per-user data folder, generated with the
+       maximum validity if missing or unusable.
+    Sets ACTIVE_DEBUG_KS to the keystore that signing must use."""
+    global ACTIVE_DEBUG_KS
+
+    for ks in (KEYSTORE, USER_KEYSTORE):
+        if ks.exists():
+            ok = _debug_ks_valid(ks, log)
+            if ok is None:
+                return False
+            if ok:
+                ACTIVE_DEBUG_KS = ks
+                return True
+
+    # Nothing usable — (re)generate in the writable per-user folder.
+    try:
+        USER_KEYSTORE.parent.mkdir(parents=True, exist_ok=True)
+        if USER_KEYSTORE.exists():
+            bak = USER_KEYSTORE.with_name(USER_KEYSTORE.name + '.bak')
+            log(f'[!] {USER_KEYSTORE} has no usable "{DEBUG_KS_ALIAS}" key — '
+                f'regenerating (old file → {bak.name})')
+            os.replace(USER_KEYSTORE, bak)
+        else:
+            log(f'[*] No usable debug keystore — generating {USER_KEYSTORE} …')
+        r = subprocess.run(
+            [KEYTOOL_EXE, '-genkeypair', '-keystore', str(USER_KEYSTORE),
+             '-alias', DEBUG_KS_ALIAS,
+             '-keyalg', 'RSA', '-keysize', '2048',
+             '-validity', str(_max_validity_days()),
+             '-storepass', DEBUG_KS_STORE_PASS, '-keypass', DEBUG_KS_KEY_PASS,
+             '-dname', 'CN=Android Debug, O=Android, C=US'],
+            capture_output=True, text=True)
+    except (OSError, FileNotFoundError) as e:
+        log(f'[-] Could not create debug keystore: {e}')
+        return False
+    if r.returncode != 0:
+        log('[-] Failed to generate debug keystore:')
+        for line in (r.stderr or r.stdout or '').strip().splitlines()[-10:]:
+            log(f'    {line}')
+        return False
+    ACTIVE_DEBUG_KS = USER_KEYSTORE
+    log('[+] Debug keystore created.')
+    return True
+
+
 def _sign_apk(src: Path, dst: Path, log,
               keystore: Path = KEYSTORE,
               alias: str = 'androiddebugkey',
@@ -10044,8 +10129,6 @@ def check_deps() -> list:
         missing.append(f'Missing {AAPT2.name}  →  expected at:\n      {AAPT2}')
     if not APKSIGNER.exists():
         missing.append(f'Missing {APKSIGNER.name}  →  expected at:\n      {APKSIGNER}')
-    if not KEYSTORE.exists():
-        missing.append(f'Missing {KEYSTORE.name}  →  expected at:\n      {KEYSTORE}')
     if not ZIPALIGN.exists():
         missing.append(
             'Missing zipalign.exe  →  copy it from your Android SDK:\n'
@@ -10116,6 +10199,11 @@ class AppConfig:
         self.key_alias     : str           = kw.get('key_alias', 'androiddebugkey')
         self.store_pass    : str           = kw.get('store_pass', 'android')
         self.key_pass      : str           = kw.get('key_pass',   'android')
+        if not self.keystore_path:
+            # Debug keystore selected: always use the standard debug values
+            self.key_alias  = DEBUG_KS_ALIAS
+            self.store_pass = DEBUG_KS_STORE_PASS
+            self.key_pass   = DEBUG_KS_KEY_PASS
         # AdMob
         self.admob_enabled  : bool = bool(kw.get('admob_enabled', False))
         self.admob_app_id   : str  = kw.get('admob_app_id', '')
@@ -10174,6 +10262,8 @@ class ProjectBuilder:
         self.log('[*] Generating icons …')
         self._make_icons()
 
+        if not OUTPUT_DIR:
+            raise RuntimeError('Please select output directory')
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         safe     = re.sub(r'[^a-zA-Z0-9_-]', '_', cfg.app_name)
         safe_ver = re.sub(r'[^a-zA-Z0-9._-]', '_', cfg.version_name)
@@ -10343,8 +10433,11 @@ class ProjectBuilder:
             return False
         if not _zipalign(linked, aligned, self.log):
             return False
+        if not cfg.keystore_path and not _ensure_debug_keystore(self.log):
+            self.log('[-] Signing failed — could not prepare debug keystore.')
+            return False
         if not _sign_apk(aligned, apk_out, self.log,
-                         keystore   = Path(cfg.keystore_path) if cfg.keystore_path else KEYSTORE,
+                         keystore   = Path(cfg.keystore_path) if cfg.keystore_path else ACTIVE_DEBUG_KS,
                          alias      = cfg.key_alias,
                          store_pass = cfg.store_pass,
                          key_pass   = cfg.key_pass):
@@ -10479,7 +10572,7 @@ class ProjectBuilder:
         # Sign the AAB with jarsigner (bundletool bundles are signed with jarsigner, not apksigner)
         self.log('[*] AAB: Signing with jarsigner …')
         jarsigner = _jre_exe('jarsigner')
-        ks_path = Path(cfg.keystore_path) if cfg.keystore_path else KEYSTORE
+        ks_path = Path(cfg.keystore_path) if cfg.keystore_path else ACTIVE_DEBUG_KS
         sign_cmd = [
             jarsigner,
             '-keystore',  str(ks_path),
@@ -11134,7 +11227,7 @@ def run_gui():
         kpass  = v_ks_keypass.get() or 'android'
         cmd = [KEYTOOL_EXE, '-genkeypair', '-v',
                '-keystore', out_path, '-alias', alias,
-               '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000',
+               '-keyalg', 'RSA', '-keysize', '2048', '-validity', str(_max_validity_days()),
                '-storepass', stpass, '-keypass', kpass,
                '-dname', 'CN=Html2Apk, OU=Dev, O=Dev, L=City, S=State, C=US']
         try:
@@ -11169,6 +11262,27 @@ def run_gui():
     v_load         = tk.BooleanVar(value=True)
     v_signed       = tk.BooleanVar(value=True)
     v_aab          = tk.BooleanVar(value=False)
+    v_output_dir   = tk.StringVar(value='')
+
+    # ── Output Directory card ─────────────────────────────────────────────────
+    tk.Label(pg_out, text='Output Directory', fg=FG_DIM, bg=BG,
+             font=('Segoe UI', 9)).pack(anchor='w', padx=24, pady=(8, 2))
+    out_row = tk.Frame(pg_out, bg=BG)
+    out_row.pack(fill='x', padx=24, pady=(0, 2))
+    out_entry = tk.Entry(out_row, textvariable=v_output_dir, bg=CARD, fg=FG,
+                         insertbackground=FG, font=FONT, bd=0, relief='flat')
+    out_entry.pack(side='left', fill='x', expand=True, ipady=6, ipadx=8)
+    def _browse_output_dir():
+        p = filedialog.askdirectory(title='Select output directory', parent=root)
+        if p:
+            v_output_dir.set(p)
+    tk.Button(out_row, text='Browse', bg=ACCENT, fg=FG, activebackground=ACCENT_H,
+              activeforeground=FG, font=FONT, bd=0, relief='flat',
+              padx=12, pady=4, cursor='hand2',
+              command=_browse_output_dir).pack(side='left', padx=(8, 0))
+    out_row.pack_configure(pady=(0, 10))
+
+    _sep(pg_out)
 
     _combo(pg_out, 'Build Type', v_build_type, ['APK', 'AAB (Android App Bundle)'], width=30)
     _combo(pg_out, 'Orientation', v_orient, ['unspecified', 'portrait', 'landscape'], width=20)
@@ -11226,11 +11340,37 @@ def run_gui():
                 '\n\n'.join(f'• {m}' for m in missing), parent=root)
             return
 
-        ks = v_ks_path.get().strip()
+        sign_tag = _sign_tags.get(v_sign_mode.get(), 'debug')
+        # Debug / unsigned modes ignore the keystore fields and use the
+        # default debug key (androiddebugkey / android / android).
+        ks = v_ks_path.get().strip() if sign_tag in ('generate', 'upload') else ''
+        if sign_tag in ('generate', 'upload') and not ks:
+            messagebox.showerror('Keystore required',
+                'Select a keystore file (or generate one) on the Signing page,\n'
+                'or switch Signing Mode to Debug.', parent=root)
+            return
         if ks and not Path(ks).exists():
             messagebox.showerror('Keystore not found',
                 f'The keystore file was not found:\n\n{ks}', parent=root)
             return
+
+        # Resolve output directory — prompt if blank
+        out_dir_val = v_output_dir.get().strip()
+        if not out_dir_val:
+            chosen = filedialog.askdirectory(title='Please select output directory', parent=root)
+            if not chosen:
+                messagebox.showwarning('Output Directory', 'No output directory selected. Build cancelled.', parent=root)
+                return
+            v_output_dir.set(chosen)
+            out_dir_val = chosen
+        out_path = Path(out_dir_val).expanduser().resolve()
+        if out_path.exists() and not out_path.is_dir():
+            messagebox.showerror('Output Directory',
+                f'The selected output path is a file, not a folder:\n\n{out_path}', parent=root)
+            return
+        v_output_dir.set(str(out_path))
+        global OUTPUT_DIR
+        OUTPUT_DIR = out_path
 
         _clear_log()
         show_page('general')
@@ -11238,7 +11378,6 @@ def run_gui():
         prog_bar.pack(side='right', padx=(8, 0)); prog_bar.start(12)
 
         # Resolve sign mode
-        sign_tag = _sign_tags.get(v_sign_mode.get(), 'debug')
         use_signed  = sign_tag != 'unsigned'
         use_aab     = 'AAB' in v_build_type.get()
 
@@ -11273,10 +11412,10 @@ def run_gui():
             target_sdk           = ANDROID_VERSIONS.get(_v_target_sdk.get(), DEFAULT_TARGET_SDK),
             signed               = use_signed,
             build_aab            = use_aab,
-            keystore_path        = v_ks_path.get().strip() or None,
-            key_alias            = v_ks_alias.get().strip() or 'androiddebugkey',
-            store_pass           = v_ks_stpass.get()        or 'android',
-            key_pass             = v_ks_keypass.get()       or 'android',
+            keystore_path        = ks or None,
+            key_alias            = (v_ks_alias.get().strip() or DEBUG_KS_ALIAS) if ks else DEBUG_KS_ALIAS,
+            store_pass           = (v_ks_stpass.get()  or DEBUG_KS_STORE_PASS)  if ks else DEBUG_KS_STORE_PASS,
+            key_pass             = (v_ks_keypass.get() or DEBUG_KS_KEY_PASS)    if ks else DEBUG_KS_KEY_PASS,
             # AdMob
             admob_enabled        = v_admob_enabled.get(),
             admob_app_id         = v_admob_app_id.get().strip(),
